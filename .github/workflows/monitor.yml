@@ -1,0 +1,30 @@
+name: Bicep Ticket Monitor
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 min (free tier safe)
+  workflow_dispatch:          # lets you trigger a manual run from GitHub UI
+
+jobs:
+  check-tickets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run ticket check
+        env:
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN:  ${{ secrets.TWILIO_AUTH_TOKEN }}
+          WHATSAPP_FROM:      ${{ secrets.WHATSAPP_FROM }}
+          WHATSAPP_TO:        ${{ secrets.WHATSAPP_TO }}
+        run: python monitor.py --once
