@@ -8,7 +8,7 @@ on:
 jobs:
   check-tickets:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 5
 
     steps:
       - uses: actions/checkout@v4
@@ -17,6 +17,11 @@ jobs:
         with:
           python-version: "3.11"
           cache: "pip"
+
+      - name: Install system dependencies for Chrome
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y chromium-browser chromium-chromedriver
 
       - name: Install dependencies
         run: pip install -r requirements.txt
