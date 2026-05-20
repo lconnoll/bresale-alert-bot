@@ -26,7 +26,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "300"))
 
 # ─────────────────────────────────────────
 # TWICKETS SEARCH  (official RAH resale partner)
-# ─────────────────────────────────────────
+# ────────────────────────��────────────────
 TWICKETS_API = "https://www.twickets.live/services/catalogue"
 TWICKETS_PARAMS = {
     "q":        "bicep",
@@ -55,16 +55,29 @@ log = logging.getLogger(__name__)
 def fetch_twickets_listings() -> list[dict]:
     """Call the Twickets catalogue API and return raw listing dicts."""
     try:
+        # Use a realistic browser User-Agent to avoid being blocked
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-GB,en;q=0.9",
+            "Referer": "https://www.twickets.live/",
+        }
         resp = requests.get(
             TWICKETS_API,
             params=TWICKETS_PARAMS,
             timeout=15,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; TicketBot/1.0)"},
+            headers=headers,
         )
         resp.raise_for_status()
         data = resp.json()
         # Twickets wraps results under different keys depending on version
         return data.get("listings") or data.get("events") or data.get("results") or []
+    except requests.exceptions.HTTPError as exc:
+        if exc.response.status_code == 403:
+            log.warning("Twickets API returned 403 Forbidden – the API may be blocking automated requests. Consider adding delays or using a rotating proxy.")
+        else:
+            log.warning("Twickets request failed: %s", exc)
+        return []
     except requests.RequestException as exc:
         log.warning("Twickets request failed: %s", exc)
         return []
