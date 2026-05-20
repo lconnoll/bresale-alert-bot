@@ -26,7 +26,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "300"))
 
 # ─────────────────────────────────────────
 # TWICKETS SEARCH  (official RAH resale partner)
-# ────────────────────────��────────────────
+# ─────────────────────────────────────────
 TWICKETS_API = "https://www.twickets.live/services/catalogue"
 TWICKETS_PARAMS = {
     "q":        "bicep",
@@ -51,38 +51,76 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# Global session to maintain cookies/state
+session = requests.Session()
+
 
 def fetch_twickets_listings() -> list[dict]:
     """Call the Twickets catalogue API and return raw listing dicts."""
     try:
-        # Use a realistic browser User-Agent to avoid being blocked
+        # First, visit the main page to get session cookies
+        log.info("Initializing Twickets session...")
+        session.get(
+            "https://www.twickets.live",
+            timeout=15,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            },
+        )
+        
+        # Add delay to avoid rate limiting
+        time.sleep(2)
+        
+        # Now make the actual API request with cookies
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json",
             "Accept-Language": "en-GB,en;q=0.9",
-            "Referer": "https://www.twickets.live/",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Referer": "https://www.twickets.live/search/bicep?regionId=gb&lang=en_GB",
+            "X-Requested-With": "XMLHttpRequest",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
         }
-        resp = requests.get(
+        
+        log.info("Fetching Twickets listings from: %s", TWICKETS_API)
+        resp = session.get(
             TWICKETS_API,
             params=TWICKETS_PARAMS,
             timeout=15,
             headers=headers,
         )
+        
+        log.info("Response status: %d", resp.status_code)
+        log.debug("Response headers: %s", dict(resp.headers))
+        
         resp.raise_for_status()
         data = resp.json()
+        
         # Twickets wraps results under different keys depending on version
-        return data.get("listings") or data.get("events") or data.get("results") or []
+        listings = data.get("listings") or data.get("events") or data.get("results") or []
+        log.info("Successfully retrieved %d listings", len(listings))
+        return listings
+        
     except requests.exceptions.HTTPError as exc:
         if exc.response.status_code == 403:
-            log.warning("Twickets API returned 403 Forbidden – the API may be blocking automated requests. Consider adding delays or using a rotating proxy.")
+            log.error("403 Forbidden - Twickets is blocking automated requests")
+            log.error("Response text: %s", exc.response.text[:500])
+            log.error("Response headers: %s", dict(exc.response.headers))
+            log.info("Potential solutions:")
+            log.info("1. Try accessing https://www.twickets.live in a browser first")
+            log.info("2. Twickets may require JavaScript/browser rendering (try Selenium)")
+            log.info("3. IP may be blocked - try from different network")
+            log.info("4. Check if Twickets requires authentication")
         else:
-            log.warning("Twickets request failed: %s", exc)
+            log.error("HTTP Error %d: %s", exc.response.status_code, exc)
         return []
     except requests.RequestException as exc:
-        log.warning("Twickets request failed: %s", exc)
+        log.error("Request failed: %s", exc)
         return []
     except ValueError as exc:
-        log.warning("Twickets JSON parse error: %s", exc)
+        log.error("JSON parse error: %s", exc)
         return []
 
 
