@@ -2,14 +2,21 @@
 """
 Bicep @ Royal Albert Hall – Twickets Resale Monitor
 Sends a WhatsApp alert via Twilio when tickets appear on Twickets.
+
+Uses Selenium with headless Chrome to bypass CloudFront WAF blocking.
 """
 
 import os
 import time
 import logging
-import requests
+import json
 from datetime import datetime
 from twilio.rest import Client
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.options import Options
 
 # ─────────────────────────────────────────
 # CONFIG  (set these as environment vars or edit directly)
@@ -27,12 +34,7 @@ POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "300"))
 # ─────────────────────────────────────────
 # TWICKETS SEARCH  (official RAH resale partner)
 # ─────────────────────────────────────────
-TWICKETS_API = "https://www.twickets.live/services/catalogue"
-TWICKETS_PARAMS = {
-    "q":        "bicep",
-    "regionId": "gb",
-    "lang":     "en_GB",
-}
+TWICKETS_URL = "https://www.twickets.live/search/bicep?regionId=gb&lang=en_GB"
 TWICKETS_EVENT_URL = "https://www.twickets.live/app/block"
 
 # Keywords that must appear in an event title/venue to be a match
@@ -51,77 +53,82 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# Global session to maintain cookies/state
-session = requests.Session()
-
 
 def fetch_twickets_listings() -> list[dict]:
-    """Call the Twickets catalogue API and return raw listing dicts."""
+    """Use Selenium to fetch Twickets listings (bypasses CloudFront WAF)."""
+    driver = None
     try:
-        # First, visit the main page to get session cookies
-        log.info("Initializing Twickets session...")
-        session.get(
-            "https://www.twickets.live",
-            timeout=15,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            },
+        log.info("Starting headless Chrome browser...")
+        
+        # Configure Chrome options for headless mode
+        chrome_options = Options()
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+        
+        driver = webdriver.Chrome(options=chrome_options)
+        
+        log.info("Loading Twickets search page: %s", TWICKETS_URL)
+        driver.get(TWICKETS_URL)
+        
+        # Wait for the page to load and JavaScript to render listings
+        log.info("Waiting for listings to load...")
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "[data-listing-id], .listing-item, [class*='listing']"))
         )
         
-        # Add delay to avoid rate limiting
-        time.sleep(2)
+        time.sleep(2)  # Extra wait for any AJAX to complete
         
-        # Now make the actual API request with cookies
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Accept-Language": "en-GB,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Referer": "https://www.twickets.live/search/bicep?regionId=gb&lang=en_GB",
-            "X-Requested-With": "XMLHttpRequest",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-origin",
-        }
+        # Try to extract listings from window.__data or similar
+        log.info("Extracting listings data from page...")
+        listings = driver.execute_script("""
+            // Try multiple ways to find listings data
+            
+            // Method 1: Check window.__data or __INITIAL_STATE__
+            if (window.__data && window.__data.listings) {
+                return window.__data.listings;
+            }
+            if (window.__INITIAL_STATE__ && window.__INITIAL_STATE__.listings) {
+                return window.__INITIAL_STATE__.listings;
+            }
+            
+            // Method 2: Parse from DOM elements
+            const results = [];
+            document.querySelectorAll('[data-listing-id], .listing-item').forEach(el => {
+                const listing = {
+                    id: el.getAttribute('data-listing-id') || el.id,
+                    title: el.querySelector('[class*="title"], h3')?.textContent || '',
+                    eventName: el.querySelector('[class*="event"], h2')?.textContent || '',
+                    venueName: el.querySelector('[class*="venue"]')?.textContent || '',
+                    date: el.querySelector('[class*="date"]')?.textContent || '',
+                    price: el.querySelector('[class*="price"]')?.textContent || '',
+                    quantity: el.querySelector('[class*="quantity"]')?.textContent || '',
+                };
+                if (listing.id || listing.title || listing.eventName) {
+                    results.push(listing);
+                }
+            });
+            
+            return results.length > 0 ? results : null;
+        """)
         
-        log.info("Fetching Twickets listings from: %s", TWICKETS_API)
-        resp = session.get(
-            TWICKETS_API,
-            params=TWICKETS_PARAMS,
-            timeout=15,
-            headers=headers,
-        )
+        if listings:
+            log.info("Successfully extracted %d listings from page", len(listings))
+            return listings if isinstance(listings, list) else []
         
-        log.info("Response status: %d", resp.status_code)
-        log.debug("Response headers: %s", dict(resp.headers))
-        
-        resp.raise_for_status()
-        data = resp.json()
-        
-        # Twickets wraps results under different keys depending on version
-        listings = data.get("listings") or data.get("events") or data.get("results") or []
-        log.info("Successfully retrieved %d listings", len(listings))
-        return listings
-        
-    except requests.exceptions.HTTPError as exc:
-        if exc.response.status_code == 403:
-            log.error("403 Forbidden - Twickets is blocking automated requests")
-            log.error("Response text: %s", exc.response.text[:500])
-            log.error("Response headers: %s", dict(exc.response.headers))
-            log.info("Potential solutions:")
-            log.info("1. Try accessing https://www.twickets.live in a browser first")
-            log.info("2. Twickets may require JavaScript/browser rendering (try Selenium)")
-            log.info("3. IP may be blocked - try from different network")
-            log.info("4. Check if Twickets requires authentication")
-        else:
-            log.error("HTTP Error %d: %s", exc.response.status_code, exc)
+        log.warning("Could not extract listings from page - checking network responses...")
         return []
-    except requests.RequestException as exc:
-        log.error("Request failed: %s", exc)
+        
+    except Exception as exc:
+        log.error("Selenium error: %s", exc, exc_info=True)
         return []
-    except ValueError as exc:
-        log.error("JSON parse error: %s", exc)
-        return []
+    finally:
+        if driver:
+            driver.quit()
+            log.info("Browser closed")
 
 
 def is_target_event(listing: dict) -> bool:
@@ -133,6 +140,7 @@ def is_target_event(listing: dict) -> bool:
         str(listing.get("venueName", "")),
         str(listing.get("venue", "")),
         str(listing.get("title", "")),
+        str(listing.get("event", "")),
     ]).lower()
 
     # Must mention Bicep
@@ -164,7 +172,7 @@ def build_alert_message(listings: list[dict]) -> str:
     ]
     for lst in listings[:5]:   # cap at 5 to keep message readable
         name  = lst.get("eventName") or lst.get("name") or lst.get("title") or "Bicep RAH"
-        date  = lst.get("eventDate") or lst.get("date") or lst.get("startDate") or "Nov 2026"
+        date  = lst.get("eventDate") or lst.get("date") or lst.get("startDate") or lst.get("date") or "Nov 2026"
         qty   = lst.get("quantity") or lst.get("ticketCount") or "?"
         price = lst.get("price") or lst.get("faceValue") or "?"
         eid   = lst.get("id") or lst.get("eventId") or ""
